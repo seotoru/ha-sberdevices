@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
@@ -33,6 +34,8 @@ from .core.entity import SberEntity
 from .core.runtime import SberConfigEntry
 from .core.snapshot import DeviceState
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def get_color_temp_range(device_type: str) -> tuple[int, int]:
     return COLOR_TEMP_RANGES.get(device_type, DEFAULT_COLOR_TEMP_RANGE)
@@ -42,17 +45,20 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: SberConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     runtime_data = entry.runtime_data
-    async_add_entities(
-        [
-            SberLightEntity(
-                runtime_data.coordinator,
+    entities: list[SberLightEntity] = []
+    for device in runtime_data.coordinator.data.values():
+        if not any(t in device["image_set_type"] for t in LIGHT_TYPES):
+            continue
+        device_type = next(t for t in LIGHT_TYPES if t in device["image_set_type"])
+        try:
+            entities.append(SberLightEntity(runtime_data.coordinator, device["id"], device_type))
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception(
+                "Skipping light %s (%s): failed to create entity",
                 device["id"],
-                next(t for t in LIGHT_TYPES if t in device["image_set_type"]),
+                device["image_set_type"],
             )
-            for device in runtime_data.coordinator.data.values()
-            if any(t in device["image_set_type"] for t in LIGHT_TYPES)
-        ]
-    )
+    async_add_entities(entities)
 
 
 class SberLightEntity(SberEntity, LightEntity):
@@ -63,7 +69,7 @@ class SberLightEntity(SberEntity, LightEntity):
         self._attr_min_color_temp_kelvin = self._real_color_temp_range[0]
         self._attr_max_color_temp_kelvin = self._real_color_temp_range[1]
 
-        light_mode_values = self.get_attribute("light_mode")["enum_values"]["values"]
+        light_mode_values = self._enum_values("light_mode")
         self._supports_brightness = self.has_attribute("light_brightness")
         self._supports_color_temp = self.has_attribute("light_colour_temp")
         self._supports_hs = "colour" in light_mode_values and self.has_attribute("light_colour")
@@ -123,6 +129,15 @@ class SberLightEntity(SberEntity, LightEntity):
 
         return [value for value in values if isinstance(value, str)]
 
+    def _current_light_mode(self) -> str | None:
+        if not self.has_attribute("light_mode"):
+            return None
+        try:
+            mode = self.get_desired_state("light_mode").get("enum_value")
+        except KeyError:
+            return None
+        return mode if isinstance(mode, str) else None
+
     def _build_effect_list(self) -> list[str]:
         effect_values = [*self._scene_effect_values]
         if self._supports_music_effect:
@@ -139,7 +154,7 @@ class SberLightEntity(SberEntity, LightEntity):
         )
 
     def _current_effect(self) -> str:
-        mode = self.get_desired_state("light_mode")["enum_value"]
+        mode = self._current_light_mode()
         if mode == "scene":
             scene = self.get_desired_state("light_scene").get("enum_value")
             if isinstance(scene, str) and scene:
@@ -176,8 +191,8 @@ class SberLightEntity(SberEntity, LightEntity):
         return effect is not None and effect != EFFECT_OFF
 
     def _current_ha_color_mode(self) -> ColorMode:
-        mode = self.get_desired_state("light_mode")["enum_value"]
-        if self._is_effect_mode(mode):
+        mode = self._current_light_mode()
+        if mode is not None and self._is_effect_mode(mode):
             return ColorMode.BRIGHTNESS if self._supports_brightness else ColorMode.ONOFF
 
         match mode:
@@ -223,7 +238,10 @@ class SberLightEntity(SberEntity, LightEntity):
         self._attr_hs_color = self._compute_hs_color()
 
     def _update_attrs(self) -> None:
-        self._attr_is_on = self.get_desired_state("on_off")["bool_value"]
+        try:
+            self._attr_is_on = bool(self.get_desired_state("on_off").get("bool_value"))
+        except KeyError:
+            self._attr_is_on = False
         self._attr_color_mode = self._current_ha_color_mode()
         if self._effect_values:
             self._attr_effect = self._current_effect()

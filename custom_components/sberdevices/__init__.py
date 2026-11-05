@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
@@ -9,6 +11,8 @@ from .core.auth import SberAuthClient
 from .core.coordinator import SberDataUpdateCoordinator
 from .core.gateway import SberHomeGatewayClient
 from .core.runtime import SberConfigEntry, SberRuntimeData
+
+_LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SWITCH]
 
@@ -27,6 +31,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SberConfigEntry) -> bool
 
     try:
         await coordinator.async_config_entry_first_refresh()
+        for device in coordinator.data.values():
+            _LOGGER.info(
+                "Discovered %s image_set_type=%s",
+                device["name"]["name"],
+                device["image_set_type"],
+            )
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except Exception:
         await entry.runtime_data.async_close()
